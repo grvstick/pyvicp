@@ -1,5 +1,5 @@
 [project]
-name = "example_package_bobmcnamara"
+name = "pyvicp"
 description = "LeCroy VICP protocol in pure Python"
 readme = "README.md"
 requires-python = ">=3.7"

@@ -94,14 +94,8 @@ logger = logging.getLogger(__name__)
 SERVER_PORT_NUM = 1861  # port # registered with IANA for lecroy-vicp
 HEADER_FORMAT = "!BBBBI"  # format of network header
 HEADER_VERSION1 = 0x01  # Header Version
-CONNECT_TIMEOUT_SECS = 2
+CONNECT_TIMEOUT_SECS = 5
 DEFAULT_TIMEOUT_SECS = 10
-
-# threshold below which header and payload are copied into a contiguous
-# buffer before sending.  this is tradeoff between data copies vs.
-# number of calls to socket.sendall().  this threshold is copied
-# from the original C++ version of this code.
-SMALL_DATA_BUFSIZE = 8192
 
 
 class OPERATION:
@@ -160,13 +154,13 @@ class Client:
         self,
         address: str,
         port: int = SERVER_PORT_NUM,
-        open_timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
         debug: bool = False,
     ) -> None:
         if debug:
             logger.setLevel("DEBUG")
 
-        connect_timeout = 1e-3 * open_timeout if open_timeout else CONNECT_TIMEOUT_SECS
+        connect_timeout = timeout or CONNECT_TIMEOUT_SECS
         self.ipaddr = address  # IP address of the instrument
         self.port = port  # port number
         self._remote_mode = False  # if True, device is in remote mode
@@ -192,7 +186,10 @@ class Client:
 
         # finally, connect and configure the default timeout
         self._socket = self._connect_to_device(connect_timeout)
-        self._socket.settimeout(DEFAULT_TIMEOUT_SECS)
+
+        # initialize variables
+        self.keepalive = False
+        self.timeout = DEFAULT_TIMEOUT_SECS
 
     @property
     def timeout(self) -> Optional[float]:
@@ -202,6 +199,24 @@ class Client:
     def timeout(self, value: float) -> None:
         self._socket.settimeout(value)
 
+    @property
+    def keepalive(self) -> bool:
+        """Status of the TCP keepalive.
+
+        Keepalive is on/off for both the sync and async sockets
+
+        If a connection is dropped as a result of “keepalives”, the error code
+        VI_ERROR_CONN_LOST is returned to current and subsequent I/O
+        calls on the session.
+
+        """
+        return self._keepalive
+
+    @keepalive.setter
+    def keepalive(self, keepalive: bool) -> None:
+        self._keepalive = bool(keepalive)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, bool(keepalive))
+
     # --------------------------------------------------------------------------
     def close(self) -> None:
         """
@@ -210,10 +225,13 @@ class Client:
         logger.debug("Disconnecting:")
 
         # check if connected
-        if self._socket is not None:  # check socket handle
+        if hasattr(self, "_socket"):
             logger.debug("close %s:", self._socket)
-            self._socket.shutdown(socket.SHUT_RDWR)
-            self._socket.close()
+            try:
+                self._socket.shutdown(socket.SHUT_RDWR)
+                self._socket.close()
+            except OSError:
+                pass
             del self._socket
 
         # reset any partial read operation
@@ -295,86 +313,26 @@ class Client:
         return self._socket.recv(1, socket.MSG_OOB)[0]
 
     # --------------------------------------------------------------------------
-    def _send_data_to_device(
-        self,
-        message: bytes = b"",
-        eoi_termination: bool = False,
-        device_clear: bool = False,
-        serial_poll: bool = False,
-    ) -> None:
-        """
-        send a block of data to a network device.
-        errors raise an exception.
-        """
-        bytes_to_send = len(message)
-
-        # handle cases where the user didn't read all data from a previous query
-        if (
-            self._flush_unread_responses
-            and self._recv_block.read_state != READSTATE.header
-        ):
-            # dump the unread partial buffer
-            self._receive_flush(
-                self._recv_block.block_size - self._recv_block.bytes_read
-            )
-            self._recv_block.read_state = READSTATE.header
-
-        # send header
-        flags = OPERATION.data
-        if eoi_termination:
-            flags |= OPERATION.eoi
-        if self._remote_mode:
-            flags |= OPERATION.remote
-        if device_clear:
-            flags |= OPERATION.clear
-        if self._local_lockout:
-            flags |= OPERATION.lockout
-        if serial_poll:
-            flags |= OPERATION.reqserialpoll
-
-        seq_num = self._get_next_sequence_number(eoi_termination)  # sequence number
-
-        header = struct.pack(
-            HEADER_FORMAT, flags, HEADER_VERSION1, seq_num, 0, bytes_to_send
-        )
-
-        logger.debug("_send_data_to_device: seq=%d eoi=%d", seq_num, eoi_termination)
-
-        if bytes_to_send < SMALL_DATA_BUFSIZE:
-            # if the block is relatively small, optimize for network efficiency
-            # (use one 'send' command for header + data)
-            self._socket.sendall(header + message)
-        else:
-            # send header and message separately (to avoid copying the data).
-            self._socket.sendall(header)
-            self._socket.sendall(message)
-        bytes_sent = len(message)
-        logger.debug("bytes_sent=%d [%.20s]", bytes_sent, message)
-
-    # --------------------------------------------------------------------------
     def _send_packet(self, payload: bytes = b"", flags: int = OPERATION.eoi) -> None:
         """
         send a block of data to the device.
         """
 
         # build the header
-        flags |= OPERATION.data
         eoi_termination = (flags & OPERATION.eoi) != 0
         seq_num = self._get_next_sequence_number(eoi_termination)  # sequence number
-        payload_length = len(payload)
-        header = struct.pack(
-            HEADER_FORMAT, flags, HEADER_VERSION1, seq_num, 0, payload_length
-        )
-
         logger.debug("_send_packet: seq=%d eoi=%d", seq_num, eoi_termination)
-        if payload_length < SMALL_DATA_BUFSIZE:
-            # if the block is relatively small, optimize for network efficiency
-            # (use one 'send' command for header + data)
-            self._socket.sendall(header + payload)
-        else:
-            # send header and payload separately (to avoid copying the data).
-            self._socket.sendall(header)
-            self._socket.sendall(payload)
+
+        flags |= OPERATION.data
+        payload_length = len(payload)
+        msg = bytearray(
+            struct.pack(
+                HEADER_FORMAT, flags, HEADER_VERSION1, seq_num, 0, payload_length
+            )
+        )
+        msg.extend(payload)
+        self._socket.sendall(msg)
+
         logger.debug(
             "_send_packet: bytes_sent=%d [%.20s]",
             payload_length,
@@ -580,7 +538,7 @@ class Client:
         errors will raise an exception.
         """
         while self._recv_block.read_state == READSTATE.header:
-            self._read_one_header()
+            self._recv_block = self._get_recv_block()
 
             # header was successfully read
             logger.debug(
@@ -620,7 +578,7 @@ class Client:
                     self._recv_block.read_state = READSTATE.header
 
     # --------------------------------------------------------------------------
-    def _read_one_header(self) -> None:
+    def _get_recv_block(self) -> RecvBlock:
         """
         read one header
         assumes that READSTATE is 'header'.
@@ -659,18 +617,13 @@ class Client:
             self._socket = self._connect_to_device()
             raise ProtocolError(error_message)
 
-        # decode the bits in 'flags'
-        self._recv_block.flags = flags
-        self._recv_block.srq_state_changed = flags & OPERATION.srq
-        self._recv_block.eoi_terminated = flags & OPERATION.eoi
-        # self._recv_block.data = flags & OPERATION.data
-        # self._recv_block.remote = flags & OPERATION.remote
-        # self._recv_block.lockout = flags & OPERATION.lockout
-        # self._recv_block.clear = flags & OPERATION.clear
-        # self._recv_block.req_serial_poll = flags & OPERATION.reqserialpoll
-
-        self._recv_block.block_size = block_size
-        self._recv_block.seq_num = seq_num
-        self._recv_block.bytes_read = 0
-
-        self._recv_block.read_state = READSTATE.data
+        return RecvBlock(
+            read_state=READSTATE.data,
+            flags=flags,
+            block_size=block_size,
+            bytes_read=0,
+            eoi_terminated=flags & OPERATION.eoi,
+            srq_state=self._recv_block.srq_state,
+            srq_state_changed=flags & OPERATION.srq,
+            seq_num=seq_num,
+        )

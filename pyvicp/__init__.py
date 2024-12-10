@@ -7,6 +7,8 @@
 :
 :license: LGPL-2.1-or-later, see LICENSE for more details.
 """
+
+# ruff: noqa:F401
 from .error_status_register import EXR_LOOKUP
 from .version import __version__
-from .vicpclient import SERVER_PORT_NUM, Client, ProtocolError
+from .vicpclient import SERVER_PORT_NUM, AsyncClient, Client, ProtocolError

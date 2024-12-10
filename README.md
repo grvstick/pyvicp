@@ -33,3 +33,38 @@ In [1]: from pyvicp import Client
    ...: scope.receive()
 Out[1]: bytearray(b'LECROY,WR8208HD,LCRY5003N60179,9.8.0\n')
 ```
+
+## Async Client
+ The biggest difference from sync version, other from being async, is that client is not connected upon initiation. You can either call `connect` explicitly or use context manager
+
+```python
+# Without context manager
+import asyncio
+from pyvicp import AsyncClient
+
+async def main():
+   scope = AsyncClient("10.11.12.42")
+   try:
+      await scope.connect()
+      await scope.send(b"*idn?")
+      res = await scope.receive()
+      print(res.decode())
+   finally:
+      await scope.close()
+
+asyncio.run(main())
+```
+
+```python
+# With Context manager
+import asyncio
+from pyvicp import AsyncClient
+
+async def main():
+   async with AsyncClient("10.11.12.42") as scope:
+      await scope.send(b"*idn?")
+      res = await scope.receive()
+      print(res.decode())
+
+asyncio.run(main())
+```

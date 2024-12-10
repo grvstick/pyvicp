@@ -646,8 +646,9 @@ class AsyncClient:
             False  # version 1a of the VICP protocol supported
         )
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "AsyncClient":
         await self.connect()
+        return self
 
     async def __aexit__(self, exc_type, exc, tb):
         await self.close()

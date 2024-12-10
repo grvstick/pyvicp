@@ -649,7 +649,7 @@ class AsyncClient:
     async def __aenter__(self):
         await self.connect()
 
-    async def __aclose__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         await self.close()
 
     async def connect(self):
@@ -660,7 +660,7 @@ class AsyncClient:
         if self._writer is not None:
             self._writer.close()
             await self._writer.wait_closed()
-            
+
         self._reader, self._writer = None, None
 
     async def send(self, cmdstr: bytes) -> None:

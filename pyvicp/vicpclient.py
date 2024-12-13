@@ -628,6 +628,8 @@ class AsyncClient:
         host: str,
         port: int = SERVER_PORT_NUM,
         debug: bool = False,
+        read_timeout: int | None = None,
+        default_buf_len: int | None = None,
     ) -> None:
         if debug:
             logger.setLevel("DEBUG")
@@ -639,7 +641,10 @@ class AsyncClient:
         self._writer: asyncio.StreamWriter | None = None
         self._seq_coro = seq_num_coro()
         self._last_seq_num = 0
-        self._timeout = DEFAULT_TIMEOUT_SECS
+        self._timeout_default: int = read_timeout or DEFAULT_TIMEOUT_SECS
+        self._timeout = self._timeout_default
+        self._disble_timeout = False
+        self._default_buf_len = default_buf_len or 1024 * 1024 * 2
         self._flush_unread_responses = True  # if True, unread responses are flushed
         #  (emulate IEEE 488.2 behaviour)
         self._vicpversion1a_supported = (
@@ -655,7 +660,9 @@ class AsyncClient:
 
     async def connect(self):
         if self._writer is None:
-            self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+            self._reader, self._writer = await asyncio.open_connection(
+                self.host, self.port
+            )
 
     async def close(self):
         if self._writer is not None:
@@ -667,11 +674,23 @@ class AsyncClient:
     async def send(self, cmdstr: bytes) -> None:
         await self._send_packet(cmdstr)
 
-    async def receive(self, buf_len: int | None = None) -> bytes:
-        return await self._read_from_device(buf_len, stop_at_eob=False)
+    async def receive(self, buf_len: int | None = None, timeout: int = 0) -> bytes:
+        return await self._read_from_device(buf_len, stop_at_eob=False, timeout=timeout)
 
-    async def recv_block(self, buf_len: int | None = None) -> bytes:
-        return await self._read_from_device(buf_len, stop_at_eob=True)
+    async def recv_block(self, buf_len: int | None = None, timeout: int = 0) -> bytes:
+        return await self._read_from_device(buf_len, stop_at_eob=True, timeout=timeout)
+
+    def set_timeout(self, timeout: int):
+        """
+            timeout(int)
+            if timeout < 0, the timeout is infinite
+            if timeout = 0, the timeout is set to default
+            if timeout > 0, the timeout value is overrided into given value
+        """
+        if timeout < 0:
+            self._timeout = None  # infinite timeout
+        else:
+            self._timeout = timeout or self._timeout_default
 
     def _get_next_seq_num(self, eoi_termination: bool) -> int:
         next(self._seq_coro)
@@ -701,7 +720,6 @@ class AsyncClient:
             f"_send_packet: bytes_sent={payload_length} [{payload.decode("utf-8", errors="ignore")}]"
         )
 
-
     async def _receive_flush(self, bytes_to_dump: int) -> None:
         """
         dump data until the next header is found.
@@ -722,17 +740,18 @@ class AsyncClient:
             logger.error("read timed out")
             raise
 
-
     async def _read_from_device(
         self,
         req_len: int | None,
+        timeout: int,
         stop_at_eob: bool = False,
         return_after_srq: bool = False,
     ) -> bytes:
         """
         read block of data from a network device
         """
-        req_len = req_len or 4096
+        self.set_timeout(timeout)
+        req_len = req_len or self._default_buf_len
         reply_buf = bytes()
 
         while True:
